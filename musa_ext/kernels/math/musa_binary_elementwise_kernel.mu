@@ -2,6 +2,7 @@
 #include <musa_fp16.h>
 #include <musa_runtime.h>
 #include <stdint.h>
+#include <string.h>
 
 namespace tensorflow {
 namespace musa {
@@ -134,6 +135,124 @@ struct BFloat16MulOp {
     return __float2bfloat16(__bfloat162float(lhs) * __bfloat162float(rhs));
   }
 };
+
+// bf16 / fp16 Mul fast paths: vec8 (::uint4) contiguous kernels with packed RNE
+// multiply, plus scalar / tail-vector broadcast variants (SwiGLU-scale hot paths).
+
+__device__ __forceinline__ uint32_t MulBf16PairPacked(uint32_t a, uint32_t b) {
+  __mt_bfloat162 ap, bp;
+  memcpy(&ap, &a, sizeof(ap));
+  memcpy(&bp, &b, sizeof(bp));
+  const float lo = __low2float(ap) * __low2float(bp);
+  const float hi = __high2float(ap) * __high2float(bp);
+  const __mt_bfloat162 prod = __floats2bfloat162_rn(lo, hi);
+  uint32_t result;
+  memcpy(&result, &prod, sizeof(result));
+  return result;
+}
+
+__device__ __forceinline__ uint32_t MulHalfPairPacked(uint32_t a, uint32_t b) {
+  __half2 ap, bp;
+  memcpy(&ap, &a, sizeof(ap));
+  memcpy(&bp, &b, sizeof(bp));
+  const __half2 prod = __hmul2(ap, bp);
+  uint32_t result;
+  memcpy(&result, &prod, sizeof(result));
+  return result;
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)
+void MulBFloat16ContiguousVec8Kernel(const ::uint4* __restrict__ lhs,
+                                     const ::uint4* __restrict__ rhs,
+                                     ::uint4* __restrict__ output,
+                                     int64_t vec_size) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; idx < vec_size; idx += stride) {
+    const ::uint4 l = lhs[idx];
+    const ::uint4 r = rhs[idx];
+    ::uint4 out;
+    out.x = MulBf16PairPacked(l.x, r.x);
+    out.y = MulBf16PairPacked(l.y, r.y);
+    out.z = MulBf16PairPacked(l.z, r.z);
+    out.w = MulBf16PairPacked(l.w, r.w);
+    output[idx] = out;
+  }
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)
+void MulHalfContiguousVec8Kernel(const ::uint4* __restrict__ lhs,
+                                 const ::uint4* __restrict__ rhs,
+                                 ::uint4* __restrict__ output,
+                                 int64_t vec_size) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; idx < vec_size; idx += stride) {
+    const ::uint4 l = lhs[idx];
+    const ::uint4 r = rhs[idx];
+    ::uint4 out;
+    out.x = MulHalfPairPacked(l.x, r.x);
+    out.y = MulHalfPairPacked(l.y, r.y);
+    out.z = MulHalfPairPacked(l.z, r.z);
+    out.w = MulHalfPairPacked(l.w, r.w);
+    output[idx] = out;
+  }
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)
+void MulBFloat16ScalarKernel(const __mt_bfloat16* __restrict__ dense,
+                             const __mt_bfloat16* __restrict__ scalar,
+                             __mt_bfloat16* __restrict__ output, int64_t n) {
+  const float sf = __bfloat162float(scalar[0]);
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; idx < n; idx += stride) {
+    output[idx] =
+        __float2bfloat16(__bfloat162float(dense[idx]) * sf);
+  }
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)
+void MulHalfScalarKernel(const half* __restrict__ dense,
+                         const half* __restrict__ scalar, half* __restrict__ output,
+                         int64_t n) {
+  const __half s = *reinterpret_cast<const __half*>(scalar);
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; idx < n; idx += stride) {
+    const __half d = *reinterpret_cast<const __half*>(&dense[idx]);
+    *reinterpret_cast<__half*>(&output[idx]) = __hmul(d, s);
+  }
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)
+void MulBFloat16TailVectorKernel(const __mt_bfloat16* __restrict__ dense,
+                                 const __mt_bfloat16* __restrict__ tail_vector,
+                                 __mt_bfloat16* __restrict__ output, int64_t n,
+                                 int64_t width) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; idx < n; idx += stride) {
+    const int64_t col = idx % width;
+    output[idx] = __float2bfloat16(__bfloat162float(dense[idx]) *
+                                   __bfloat162float(tail_vector[col]));
+  }
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)
+void MulHalfTailVectorKernel(const half* __restrict__ dense,
+                             const half* __restrict__ tail_vector,
+                             half* __restrict__ output, int64_t n,
+                             int64_t width) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; idx < n; idx += stride) {
+    const int64_t col = idx % width;
+    const __half d = *reinterpret_cast<const __half*>(&dense[idx]);
+    const __half t = *reinterpret_cast<const __half*>(&tail_vector[col]);
+    *reinterpret_cast<__half*>(&output[idx]) = __hmul(d, t);
+  }
+}
 
 template <typename T, typename Op>
 __global__ __launch_bounds__(kThreadsPerBlock) void BinaryContiguousKernel(
@@ -349,14 +468,39 @@ void LaunchMusaBinaryAddTailVectorHalf(const half* dense,
 void LaunchMusaBinaryMulContiguousHalf(const half* lhs, const half* rhs,
                                        half* out, int64_t n,
                                        musaStream_t stream) {
+  if (n <= 0) return;
+  if (n >= 8 && IsAligned16(lhs) && IsAligned16(rhs) && IsAligned16(out)) {
+    const int64_t vec_size = n / 8;
+    const int blocks = ClampBlocks(vec_size, kThreadsPerBlock);
+    MulHalfContiguousVec8Kernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+        reinterpret_cast<const ::uint4*>(lhs),
+        reinterpret_cast<const ::uint4*>(rhs),
+        reinterpret_cast<::uint4*>(out), vec_size);
+    const int64_t tail = n - vec_size * 8;
+    if (tail > 0) {
+      const half* l = lhs + vec_size * 8;
+      const half* r = rhs + vec_size * 8;
+      half* o = out + vec_size * 8;
+      const int tail_blocks = ClampBlocks(tail, kThreadsPerBlock * kItemsPerThread);
+      LaunchContiguousTyped(l, r, o, tail, stream, MulOp<half>());
+    }
+    return;
+  }
   LaunchContiguousTyped(lhs, rhs, out, n, stream, MulOp<half>());
 }
 
 void LaunchMusaBinaryMulScalarHalf(const half* dense, const half* scalar,
                                    half* out, int64_t n, bool scalar_on_left,
                                    musaStream_t stream) {
-  LaunchScalarTyped(dense, scalar, out, n, scalar_on_left, stream,
-                    MulOp<half>());
+  if (n <= 0) return;
+  if (scalar_on_left) {
+    LaunchScalarTyped(dense, scalar, out, n, scalar_on_left, stream,
+                     MulOp<half>());
+    return;
+  }
+  const int blocks = ClampBlocks(n, kThreadsPerBlock);
+  MulHalfScalarKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(dense, scalar,
+                                                               out, n);
 }
 
 void LaunchMusaBinaryMulTailVectorHalf(const half* dense,
@@ -364,8 +508,15 @@ void LaunchMusaBinaryMulTailVectorHalf(const half* dense,
                                        int64_t n, int64_t width,
                                        bool vector_on_left,
                                        musaStream_t stream) {
-  LaunchTailVectorTyped(dense, tail_vector, out, n, width, vector_on_left,
-                        stream, MulOp<half>());
+  if (n <= 0 || width <= 0 || n % width != 0) return;
+  if (!vector_on_left) {
+    const int blocks = ClampBlocks(n, kThreadsPerBlock);
+    MulHalfTailVectorKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+        dense, tail_vector, out, n, width);
+    return;
+  }
+  LaunchTailVectorTyped(dense, tail_vector, out, n, width, vector_on_left, stream,
+                        MulOp<half>());
 }
 
 void LaunchMusaBinaryAddContiguousBFloat16(const __mt_bfloat16* lhs,
@@ -397,6 +548,25 @@ void LaunchMusaBinaryMulContiguousBFloat16(const __mt_bfloat16* lhs,
                                            const __mt_bfloat16* rhs,
                                            __mt_bfloat16* out, int64_t n,
                                            musaStream_t stream) {
+  if (n <= 0) return;
+  if (n >= 8 && IsAligned16(lhs) && IsAligned16(rhs) && IsAligned16(out)) {
+    const int64_t vec_size = n / 8;
+    const int blocks = ClampBlocks(vec_size, kThreadsPerBlock);
+    MulBFloat16ContiguousVec8Kernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+        reinterpret_cast<const ::uint4*>(lhs),
+        reinterpret_cast<const ::uint4*>(rhs),
+        reinterpret_cast<::uint4*>(out), vec_size);
+    const int64_t tail = n - vec_size * 8;
+    if (tail > 0) {
+      const __mt_bfloat16* l = lhs + vec_size * 8;
+      const __mt_bfloat16* r = rhs + vec_size * 8;
+      __mt_bfloat16* o = out + vec_size * 8;
+      const int tail_blocks =
+          ClampBlocks(tail, kThreadsPerBlock * kItemsPerThread);
+      LaunchContiguousTyped(l, r, o, tail, stream, BFloat16MulOp());
+    }
+    return;
+  }
   LaunchContiguousTyped(lhs, rhs, out, n, stream, BFloat16MulOp());
 }
 
@@ -405,8 +575,15 @@ void LaunchMusaBinaryMulScalarBFloat16(const __mt_bfloat16* dense,
                                        __mt_bfloat16* out, int64_t n,
                                        bool scalar_on_left,
                                        musaStream_t stream) {
-  LaunchScalarTyped(dense, scalar, out, n, scalar_on_left, stream,
-                    BFloat16MulOp());
+  if (n <= 0) return;
+  if (scalar_on_left) {
+    LaunchScalarTyped(dense, scalar, out, n, scalar_on_left, stream,
+                     BFloat16MulOp());
+    return;
+  }
+  const int blocks = ClampBlocks(n, kThreadsPerBlock);
+  MulBFloat16ScalarKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+      dense, scalar, out, n);
 }
 
 void LaunchMusaBinaryMulTailVectorBFloat16(const __mt_bfloat16* dense,
@@ -414,6 +591,13 @@ void LaunchMusaBinaryMulTailVectorBFloat16(const __mt_bfloat16* dense,
                                            __mt_bfloat16* out, int64_t n,
                                            int64_t width, bool vector_on_left,
                                            musaStream_t stream) {
+  if (n <= 0 || width <= 0 || n % width != 0) return;
+  if (!vector_on_left) {
+    const int blocks = ClampBlocks(n, kThreadsPerBlock);
+    MulBFloat16TailVectorKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+        dense, tail_vector, out, n, width);
+    return;
+  }
   LaunchTailVectorTyped(dense, tail_vector, out, n, width, vector_on_left,
                         stream, BFloat16MulOp());
 }

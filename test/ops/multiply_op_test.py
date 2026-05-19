@@ -117,6 +117,8 @@ class MultiplyOpTest(MUSATestCase):
         ([1024, 1024], [1024, 1024]),
         ([1024, 1024], []),
         ([1024, 1024], [1024]),
+        # vec8 bf16/fp16 path (8-element aligned, no 8k cap on low-precision)
+        ([256, 256], [256, 256]),
     ]
     for dtype in [tf.float32, tf.float16, tf.bfloat16, tf.int32, tf.int64]:
       rtol = 1e-2 if dtype in [tf.float16, tf.bfloat16] else 1e-5

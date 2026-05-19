@@ -1,4 +1,7 @@
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "../utils_op.h"
@@ -152,12 +155,36 @@ DEFINE_MUL_FAST_PATH_LAUNCHER(int64, Int64)
 
 constexpr int64_t kMulCustomFastPathMaxElements = 8192;
 
+inline bool UseMulCustomKernelFastPath() {
+  const char* env = std::getenv("MUSA_MUL_ENABLE_CUSTOM_KERNEL");
+  if (env == nullptr || std::string(env).empty()) return true;
+  const std::string value(env);
+  return !(value == "0" || value == "false" || value == "FALSE" ||
+           value == "off" || value == "OFF" || value == "no" || value == "NO");
+}
+
+template <typename T>
+struct MulCustomFastPathMaxElements {
+  static constexpr int64_t kValue = kMulCustomFastPathMaxElements;
+};
+
+template <>
+struct MulCustomFastPathMaxElements<bfloat16> {
+  static constexpr int64_t kValue = std::numeric_limits<int64_t>::max();
+};
+
+template <>
+struct MulCustomFastPathMaxElements<Eigen::half> {
+  static constexpr int64_t kValue = std::numeric_limits<int64_t>::max();
+};
+
 template <typename T>
 bool ShouldUseMulCustomKernelFastPath(const Tensor& in0, const Tensor& in1,
                                       const TensorShape& output_shape,
                                       bool same_shape) {
   const int64_t output_elements = output_shape.num_elements();
-  if (output_elements <= 0 || output_elements > kMulCustomFastPathMaxElements) {
+  if (output_elements <= 0 ||
+      output_elements > MulCustomFastPathMaxElements<T>::kValue) {
     return false;
   }
   if (same_shape) {
@@ -186,6 +213,9 @@ MulFastPathResult TryLaunchMulFastPath(OpKernelContext* ctx, const Tensor& in0,
                                        const Tensor& in1,
                                        const TensorShape& output_shape,
                                        bool same_shape, Tensor* out) {
+  if (!UseMulCustomKernelFastPath()) {
+    return MulFastPathResult::kNotHandled;
+  }
   if (!MulFastPathLauncher<T>::kSupported ||
       !ShouldUseMulCustomKernelFastPath<T>(in0, in1, output_shape,
                                            same_shape)) {
