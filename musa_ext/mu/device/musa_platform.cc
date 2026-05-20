@@ -1,11 +1,12 @@
 #include <musa_runtime.h>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "musa_executor.h"
-#include "tensorflow/stream_executor/executor_cache.h"
-#include "tensorflow/stream_executor/lib/error.h"
-#include "tensorflow/stream_executor/multi_platform_manager.h"
-#include "tensorflow/stream_executor/platform.h"
-#include "tensorflow/stream_executor/stream_executor_internal.h"
+#include "xla/stream_executor/executor_cache.h"
+#include "xla/stream_executor/multi_platform_manager.h"
+#include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/stream_executor_internal.h"
 
 namespace stream_executor {
 namespace musa {
@@ -26,7 +27,7 @@ class MusaPlatform : public Platform {
     return count;
   }
 
-  port::StatusOr<std::unique_ptr<DeviceDescription>> DescriptionForDevice(
+  absl::StatusOr<std::unique_ptr<DeviceDescription>> DescriptionForDevice(
       int ordinal) const override {
     internal::DeviceDescriptionBuilder builder;
     builder.set_name("MUSA Device");
@@ -34,42 +35,39 @@ class MusaPlatform : public Platform {
     return builder.Build();
   }
 
-  port::StatusOr<StreamExecutor*> ExecutorForDevice(int ordinal) override {
+  absl::StatusOr<StreamExecutor*> ExecutorForDevice(int ordinal) override {
     StreamExecutorConfig config;
     config.ordinal = ordinal;
     config.device_options = DeviceOptions::Default();
     return GetExecutor(config);
   }
 
-  port::StatusOr<StreamExecutor*> ExecutorForDeviceWithPluginConfig(
-      int ordinal, const PluginConfig& plugin_config) override {
-    StreamExecutorConfig config;
-    config.ordinal = ordinal;
-    config.plugin_config = plugin_config;
-    config.device_options = DeviceOptions::Default();
-    return GetExecutor(config);
-  }
+  // TF 2.15 removed:
+  //   - Platform::ExecutorForDeviceWithPluginConfig() — PluginConfig itself
+  //     was deleted from the StreamExecutor surface as part of the C-API
+  //     PluggableDevice migration.
+  //   - Platform::RegisterTraceListener() /
+  //     Platform::UnregisterTraceListener() — trace listeners are now
+  //     registered on the StreamExecutorInterface, not the Platform.
+  // We therefore drop those overrides entirely.
 
-  port::StatusOr<StreamExecutor*> GetExecutor(
+  absl::StatusOr<StreamExecutor*> GetExecutor(
       const StreamExecutorConfig& config) override {
     return executor_cache_.GetOrCreate(
         config, [&]() { return GetUncachedExecutor(config); });
   }
 
-  void RegisterTraceListener(std::unique_ptr<TraceListener> listener) override {
-  }
-  void UnregisterTraceListener(TraceListener* listener) override {}
-
  private:
-  port::StatusOr<std::unique_ptr<StreamExecutor>> GetUncachedExecutor(
+  absl::StatusOr<std::unique_ptr<StreamExecutor>> GetUncachedExecutor(
       const StreamExecutorConfig& config) {
-    auto executor = std::make_unique<MusaExecutor>(config.plugin_config);
+    // No more PluginConfig argument: MusaExecutor is default-constructible
+    // and StreamExecutorConfig no longer carries that field.
+    auto executor = std::make_unique<MusaExecutor>();
 
     auto init_status = executor->Init(config.ordinal, config.device_options);
     if (!init_status.ok()) {
-      return port::Status(
-          port::error::INTERNAL,
-          "Failed to initialize MUSA executor: " + init_status.ToString());
+      return absl::InternalError("Failed to initialize MUSA executor: " +
+                                 init_status.ToString());
     }
 
     return std::make_unique<StreamExecutor>(this, std::move(executor),

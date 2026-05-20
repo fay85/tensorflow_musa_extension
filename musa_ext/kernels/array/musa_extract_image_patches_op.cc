@@ -49,7 +49,7 @@ Status ComputeOutputAndPadding2D(int64_t in_rows, int64_t in_cols,
                     : (in_cols - effective_cols) / stride_cols + 1;
     *pad_top = 0;
     *pad_left = 0;
-    return Status::OK();
+    return OkStatus();
   }
 
   if (padding == Padding::SAME) {
@@ -88,7 +88,7 @@ Status ComputeOutputAndPadding2D(int64_t in_rows, int64_t in_cols,
 
     *pad_top = static_cast<int>(pad_rows / 2);
     *pad_left = static_cast<int>(pad_cols / 2);
-    return Status::OK();
+    return OkStatus();
   }
 
   return errors::InvalidArgument(

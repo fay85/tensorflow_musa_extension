@@ -1,11 +1,9 @@
 #include "graph/fusion/matmul_biasadd_fusion.h"
 
 #include <algorithm>
-#include <string>
 #include <vector>
 
 #include "tensorflow/core/framework/attr_value.pb.h"
-#include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace tensorflow {
@@ -17,10 +15,6 @@ namespace {
 // Helper to check if node has specific op type
 bool IsOp(const NodeDef& node, const std::string& op_type) {
   return node.op() == op_type;
-}
-
-bool IsBiasAddLikeOp(const NodeDef& node) {
-  return IsOp(node, "BiasAdd") || IsOp(node, "Add") || IsOp(node, "AddV2");
 }
 
 std::string CanonicalizeInputName(const std::string& input) {
@@ -58,89 +52,6 @@ bool HasOriginalSuffix(const std::string& node_name) {
                            kOriginalSuffix.size(), kOriginalSuffix) == 0;
 }
 
-bool TryGetStaticTensorShape(const NodeDef& node,
-                             std::vector<int64_t>* dims) {
-  if (!dims) {
-    return false;
-  }
-  dims->clear();
-
-  auto output_shapes_it = node.attr().find("_output_shapes");
-  if (output_shapes_it != node.attr().end()) {
-    const auto& shape_list = output_shapes_it->second.list().shape();
-    if (shape_list.size() > 0) {
-      const auto& shape = shape_list.Get(0);
-      if (!shape.unknown_rank()) {
-        dims->reserve(shape.dim_size());
-        for (int i = 0; i < shape.dim_size(); ++i) {
-          const auto dim_size = shape.dim(i).size();
-          if (dim_size <= 0) {
-            dims->clear();
-            return false;
-          }
-          dims->push_back(dim_size);
-        }
-        return true;
-      }
-    }
-  }
-
-  auto shape_it = node.attr().find("shape");
-  if (shape_it != node.attr().end()) {
-    const auto& shape = shape_it->second.shape();
-    if (!shape.unknown_rank()) {
-      dims->reserve(shape.dim_size());
-      for (int i = 0; i < shape.dim_size(); ++i) {
-        const auto dim_size = shape.dim(i).size();
-        if (dim_size <= 0) {
-          dims->clear();
-          return false;
-        }
-        dims->push_back(dim_size);
-      }
-      return true;
-    }
-  }
-
-  if (!IsOp(node, "Const")) {
-    return false;
-  }
-
-  auto value_it = node.attr().find("value");
-  if (value_it == node.attr().end()) {
-    return false;
-  }
-
-  const TensorProto& tensor = value_it->second.tensor();
-  dims->reserve(tensor.tensor_shape().dim_size());
-  for (int i = 0; i < tensor.tensor_shape().dim_size(); ++i) {
-    const auto dim_size = tensor.tensor_shape().dim(i).size();
-    if (dim_size <= 0) {
-      dims->clear();
-      return false;
-    }
-    dims->push_back(dim_size);
-  }
-
-  return true;
-}
-
-bool IsStaticBiasLikeAddInput(const NodeDef* node) {
-  if (!node) {
-    return false;
-  }
-
-  std::vector<int64_t> dims;
-  if (!TryGetStaticTensorShape(*node, &dims)) {
-    return false;
-  }
-
-  if (dims.size() == 1) {
-    return dims[0] > 0;
-  }
-  return dims.size() == 2 && dims[0] == 1 && dims[1] > 0;
-}
-
 }  // namespace
 
 bool MatMulBiasAddFusion::IsKernelAvailable() const {
@@ -160,8 +71,8 @@ FusionMatchResult MatMulBiasAddFusion::Match(const GraphDef& graph,
 
   const NodeDef& bias_add_node = graph.node(start_node_idx);
 
-  // Start node must be BiasAdd / Add / AddV2.
-  if (!IsBiasAddLikeOp(bias_add_node) || bias_add_node.input_size() != 2) {
+  // Start node must be BiasAdd / Add / AddV2
+  if (!IsOp(bias_add_node, "BiasAdd")) {
     return result;
   }
 
@@ -173,25 +84,20 @@ FusionMatchResult MatMulBiasAddFusion::Match(const GraphDef& graph,
   const NodeDef* matmul_node = nullptr;
   const NodeDef* bias_node = nullptr;
 
-  const NodeDef* in0 = FindProducer(graph, bias_add_node.input(0));
-  const NodeDef* in1 = FindProducer(graph, bias_add_node.input(1));
+  if (bias_add_node.input_size() >= 2) {
+    const NodeDef* in0 = FindProducer(graph, bias_add_node.input(0));
+    const NodeDef* in1 = FindProducer(graph, bias_add_node.input(1));
 
-  if (in0 && IsOp(*in0, "MatMul") && in0->input_size() == 2) {
-    matmul_node = in0;
-    bias_node = in1;
-  } else if (in1 && IsOp(*in1, "MatMul") && in1->input_size() == 2) {
-    matmul_node = in1;
-    bias_node = in0;
+    if (in0 && IsOp(*in0, "MatMul")) {
+      matmul_node = in0;
+      bias_node = in1;
+    } else if (in1 && IsOp(*in1, "MatMul")) {
+      matmul_node = in1;
+      bias_node = in0;
+    }
   }
 
   if (!matmul_node || !bias_node) {
-    return result;
-  }
-
-  // Add/AddV2 are general elementwise ops. Only fuse cases that are exactly
-  // bias-add-like for a 2D MatMul output: [N] or [1, N]. The kernel validates
-  // the final N at runtime, which keeps dynamic MatMul weights working.
-  if (!IsOp(bias_add_node, "BiasAdd") && !IsStaticBiasLikeAddInput(bias_node)) {
     return result;
   }
 
@@ -211,12 +117,11 @@ FusionMatchResult MatMulBiasAddFusion::Match(const GraphDef& graph,
 Status MatMulBiasAddFusion::Apply(GraphDef* graph,
                                   const FusionMatchResult& match_result) const {
   if (!match_result.IsValid()) {
-    return Status(error::INVALID_ARGUMENT,
-                  "Invalid MatMulBiasAdd match result");
+    return errors::InvalidArgument("Invalid MatMulBiasAdd match result");
   }
 
   if (!IsKernelAvailable()) {
-    return Status::OK();
+    return Status();
   }
 
   auto output_it = match_result.captured_nodes.find("output");
@@ -228,8 +133,7 @@ Status MatMulBiasAddFusion::Apply(GraphDef* graph,
       matmul_it == match_result.captured_nodes.end() ||
       bias_it == match_result.captured_nodes.end() ||
       bias_add_it == match_result.captured_nodes.end()) {
-    return Status(error::INVALID_ARGUMENT,
-                  "Missing required nodes in MatMulBiasAdd pattern");
+    return errors::InvalidArgument("Missing required nodes in MatMulBiasAdd pattern");
   }
 
   const NodeDef* output_node = output_it->second;
@@ -245,7 +149,7 @@ Status MatMulBiasAddFusion::Apply(GraphDef* graph,
     if (node.name() == original_name && node.op() == "MusaMatMulBiasAdd") {
       VLOG(1) << "MusaMatMulBiasAdd: Output node " << original_name
               << " is already a fused node, skipping";
-      return Status::OK();
+      return Status();
     }
   }
 
@@ -258,8 +162,7 @@ Status MatMulBiasAddFusion::Apply(GraphDef* graph,
   }
 
   if (output_node_idx < 0) {
-    return Status(error::INVALID_ARGUMENT,
-                  "Failed to find output node in graph: " + original_name);
+    return errors::InvalidArgument("Failed to find output node in graph: " + original_name);
   }
 
   VLOG(1) << "MatMulBiasAddFusion: Replacing " << original_name
@@ -305,8 +208,7 @@ Status MatMulBiasAddFusion::Apply(GraphDef* graph,
   const bool input1_is_matmul = input1_name == matmul_node->name();
 
   if (input0_is_matmul == input1_is_matmul) {
-    return Status(error::INVALID_ARGUMENT,
-                  "Failed to determine bias input for MatMulBiasAdd fusion: " +
+    return errors::InvalidArgument("Failed to determine bias input for MatMulBiasAdd fusion: " +
                       original_name);
   }
 
@@ -339,7 +241,7 @@ Status MatMulBiasAddFusion::Apply(GraphDef* graph,
   VLOG(1) << "MatMulBiasAddFusion: Successfully replaced '" << original_name
           << "' with MusaMatMulBiasAdd";
 
-  return Status::OK();
+  return Status();
 }
 
 // Register the pattern

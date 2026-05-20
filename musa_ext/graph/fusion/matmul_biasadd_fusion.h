@@ -9,8 +9,7 @@ namespace tensorflow {
 namespace grappler {
 namespace musa_fusion {
 
-// Computes: MatMul + BiasAdd/Add/AddV2 where Add/AddV2 are [N] or [1, N]
-// bias adds.
+// Computes: MatMul + BiasAdd
 
 class MatMulBiasAddFusion : public FusionPattern {
  public:

@@ -15,7 +15,7 @@
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/public/session_options.h"
-#include "tensorflow/stream_executor/multi_platform_manager.h"
+#include "xla/stream_executor/multi_platform_manager.h"
 
 namespace tensorflow {
 void ForceMusaOptimizationPassRegistration();
@@ -70,13 +70,13 @@ class MusaDeviceFactory : public DeviceFactory {
     int count = 0;
     musaError_t err = musaGetDeviceCount(&count);
     if (err != musaSuccess) {
-      return Status::OK();
+      return Status();
     }
 
     for (int i = 0; i < count; ++i) {
       devices->push_back(strings::StrCat("/physical_device:MUSA:", i));
     }
-    return Status::OK();
+    return Status();
   }
 
   Status CreateDevices(const SessionOptions& options, const string& name_prefix,
@@ -93,7 +93,11 @@ class MusaDeviceFactory : public DeviceFactory {
     if (!platform_status.ok()) {
       return platform_status.status();
     }
-    auto* platform = platform_status.ValueOrDie();
+    // TF 2.15: absl::StatusOr (which tsl::StatusOr aliases to) removed
+    // ValueOrDie() in favor of value() / operator*.  Both abort on a !ok()
+    // payload, but ok() was already checked just above so this is purely a
+    // syntactic migration.
+    auto* platform = *platform_status;
     const bool allow_growth = GetMusaAllowGrowthValue();
 
     for (int i = 0; i < count; ++i) {
@@ -118,12 +122,12 @@ class MusaDeviceFactory : public DeviceFactory {
       if (!executor_status.ok()) {
         return executor_status.status();
       }
-      auto* executor = executor_status.ValueOrDie();
+      auto* executor = *executor_status;  // see ValueOrDie note above
 
       devices->push_back(std::unique_ptr<Device>(
           new MusaDevice(Env::Default(), attr, i, executor, allow_growth)));
     }
-    return Status::OK();
+    return Status();
   }
 };
 

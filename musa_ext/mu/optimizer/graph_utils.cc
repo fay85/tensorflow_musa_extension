@@ -40,6 +40,24 @@ namespace tensorflow {
 namespace grappler {
 namespace musa {
 
+struct GraphDumpRuntimeConfig {
+  bool has_override = false;
+  bool enabled = false;
+  bool dump_text = false;
+  bool dump_slim = false;
+  std::string dump_dir = ".";
+};
+
+std::mutex& GraphDumpConfigMutex() {
+  static std::mutex* mutex = new std::mutex;
+  return *mutex;
+}
+
+GraphDumpRuntimeConfig& MutableGraphDumpConfig() {
+  static GraphDumpRuntimeConfig* config = new GraphDumpRuntimeConfig;
+  return *config;
+}
+
 namespace {
 
 constexpr const char* kSlimDumpEnv = "MUSA_DUMP_GRAPHDEF_SLIM";
@@ -64,69 +82,11 @@ struct SlimGraphStats {
   int consts_truncated = 0;
 };
 
-struct GraphDumpRuntimeConfig {
-  bool has_override = false;
-  bool enabled = false;
-  bool dump_text = false;
-  bool dump_slim = false;
-  std::string dump_dir = ".";
-};
-
-std::mutex& GraphDumpConfigMutex() {
-  static std::mutex* mutex = new std::mutex;
-  return *mutex;
-}
-
-GraphDumpRuntimeConfig& MutableGraphDumpConfig() {
-  static GraphDumpRuntimeConfig* config = new GraphDumpRuntimeConfig;
-  return *config;
-}
-
 bool EnvFlagEnabled(const char* env_name) {
   const char* env_val = std::getenv(env_name);
   return env_val != nullptr &&
          (std::string(env_val) == "1" || std::string(env_val) == "true" ||
           std::string(env_val) == "TRUE" || std::string(env_val) == "yes");
-}
-
-// Get dump directory from environment or use default
-std::string GetDumpDirectory() {
-  {
-    std::lock_guard<std::mutex> lock(GraphDumpConfigMutex());
-    const GraphDumpRuntimeConfig& config = MutableGraphDumpConfig();
-    if (config.has_override) {
-      return config.dump_dir.empty() ? "." : config.dump_dir;
-    }
-  }
-
-  const char* env_dir = std::getenv("MUSA_DUMP_GRAPHDEF_DIR");
-  if (env_dir != nullptr && std::strlen(env_dir) > 0) {
-    return std::string(env_dir);
-  }
-  // Default to current directory
-  return ".";
-}
-
-bool IsSlimGraphDefDumpEnabled() {
-  {
-    std::lock_guard<std::mutex> lock(GraphDumpConfigMutex());
-    const GraphDumpRuntimeConfig& config = MutableGraphDumpConfig();
-    if (config.has_override) {
-      return config.dump_slim;
-    }
-  }
-  return EnvFlagEnabled(kSlimDumpEnv);
-}
-
-bool IsGraphDefTextDumpEnabled() {
-  {
-    std::lock_guard<std::mutex> lock(GraphDumpConfigMutex());
-    const GraphDumpRuntimeConfig& config = MutableGraphDumpConfig();
-    if (config.has_override) {
-      return config.dump_text;
-    }
-  }
-  return EnvFlagEnabled("MUSA_DUMP_GRAPHDEF_TEXT");
 }
 
 std::string BuildDumpBasePath(const std::string& dump_dir,
@@ -144,7 +104,7 @@ Status WriteGraphDefPbtxt(const GraphDef& graph_def,
                           const std::string& filepath) {
   std::ofstream file(filepath, std::ios::out | std::ios::trunc);
   if (!file.is_open()) {
-    return Status(tensorflow::error::INTERNAL,
+    return errors::Internal(
                   "Failed to open file for writing: " + filepath);
   }
 
@@ -157,22 +117,22 @@ Status WriteGraphDefPbtxt(const GraphDef& graph_def,
     protobuf::io::OstreamOutputStream output_stream(&file);
     protobuf::TextFormat::Printer printer;
     if (!printer.Print(graph_def, &output_stream)) {
-      return Status(tensorflow::error::INTERNAL,
+      return errors::Internal(
                     "Failed to serialize GraphDef to text format");
     }
   }
 
   file.flush();
   if (!file.good()) {
-    return Status(tensorflow::error::INTERNAL,
+    return errors::Internal(
                   "Failed to flush GraphDef text to file: " + filepath);
   }
   file.close();
   if (file.fail()) {
-    return Status(tensorflow::error::INTERNAL,
+    return errors::Internal(
                   "Failed to close GraphDef text file: " + filepath);
   }
-  return Status::OK();
+  return Status();
 }
 
 Status WriteGraphDefBinary(const GraphDef& graph_def,
@@ -180,17 +140,17 @@ Status WriteGraphDefBinary(const GraphDef& graph_def,
   std::ofstream file(filepath,
                      std::ios::out | std::ios::binary | std::ios::trunc);
   if (!file.is_open()) {
-    return Status(tensorflow::error::INTERNAL,
+    return errors::Internal(
                   "Failed to open file for writing: " + filepath);
   }
 
   if (!graph_def.SerializeToOstream(&file)) {
-    return Status(tensorflow::error::INTERNAL,
+    return errors::Internal(
                   "Failed to serialize GraphDef to binary format");
   }
 
   file.close();
-  return Status::OK();
+  return Status();
 }
 
 void ClearKnownFieldIfPresent(protobuf::Message* message,
@@ -414,6 +374,50 @@ GraphDef CreateSlimGraphDef(const GraphDef& graph_def, SlimGraphStats* stats) {
 
 }  // namespace
 
+std::string GetDumpDirectory() {
+  {
+    std::lock_guard<std::mutex> lock(GraphDumpConfigMutex());
+    const GraphDumpRuntimeConfig& config = MutableGraphDumpConfig();
+    if (config.has_override) {
+      return config.dump_dir.empty() ? "." : config.dump_dir;
+    }
+  }
+
+  const char* env_dir = std::getenv("MUSA_DUMP_GRAPHDEF_DIR");
+  if (env_dir != nullptr && std::strlen(env_dir) > 0) {
+    return std::string(env_dir);
+  }
+  return ".";
+}
+
+bool IsSlimGraphDefDumpEnabled() {
+  {
+    std::lock_guard<std::mutex> lock(GraphDumpConfigMutex());
+    const GraphDumpRuntimeConfig& config = MutableGraphDumpConfig();
+    if (config.has_override) {
+      return config.dump_slim;
+    }
+  }
+  const char* env_val = std::getenv("MUSA_DUMP_GRAPHDEF_SLIM");
+  return env_val != nullptr &&
+         (std::string(env_val) == "1" || std::string(env_val) == "true" ||
+          std::string(env_val) == "TRUE" || std::string(env_val) == "yes");
+}
+
+bool IsGraphDefTextDumpEnabled() {
+  {
+    std::lock_guard<std::mutex> lock(GraphDumpConfigMutex());
+    const GraphDumpRuntimeConfig& config = MutableGraphDumpConfig();
+    if (config.has_override) {
+      return config.dump_text;
+    }
+  }
+  const char* env_val = std::getenv("MUSA_DUMP_GRAPHDEF_TEXT");
+  return env_val != nullptr &&
+         (std::string(env_val) == "1" || std::string(env_val) == "true" ||
+          std::string(env_val) == "TRUE" || std::string(env_val) == "yes");
+}
+
 bool IsGraphDefDumpingEnabled() {
   {
     std::lock_guard<std::mutex> lock(GraphDumpConfigMutex());
@@ -428,7 +432,7 @@ bool IsGraphDefDumpingEnabled() {
 Status DumpGraphDef(const GraphDef& graph_def, const std::string& prefix,
                     const std::string& stage_description) {
   if (!IsGraphDefDumpingEnabled()) {
-    return Status::OK();
+    return Status();
   }
 
   std::string dump_dir = GetDumpDirectory();
@@ -500,7 +504,7 @@ Status DumpGraphDef(const GraphDef& graph_def, const std::string& prefix,
     }
   }
 
-  return Status::OK();
+  return Status();
 }
 
 // Initialize static member

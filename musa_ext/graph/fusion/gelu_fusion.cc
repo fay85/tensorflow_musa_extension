@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 #include <unordered_set>
 
@@ -37,6 +38,17 @@ constexpr float kOne = 1.0f;
 constexpr float kPow3 = 3.0f;
 constexpr float kApproxCoeff = 0.044715f;
 constexpr float kApproxScale = 0.7978845608f;  // sqrt(2 / pi)
+
+bool IsTruthyEnvVar(const char* env_name) {
+  const char* env_val = std::getenv(env_name);
+  if (env_val == nullptr) {
+    return false;
+  }
+
+  const std::string value(env_val);
+  return value == "1" || value == "true" || value == "TRUE" || value == "yes" ||
+         value == "YES" || value == "on" || value == "ON";
+}
 
 bool IsOp(const NodeDef& node, const std::string& op_type) {
   return node.op() == op_type;
@@ -524,9 +536,14 @@ MusaGeluFusion::MusaGeluFusion() = default;
 
 bool MusaGeluFusion::IsKernelAvailable() const {
   if (!kernel_checked_) {
-    kernel_available_ = true;
+    kernel_available_ = !IsTruthyEnvVar("MUSA_DISABLE_GELU_FUSION");
     kernel_checked_ = true;
-    VLOG(1) << "MusaGelu kernel is available";
+
+    if (kernel_available_) {
+      VLOG(1) << "MusaGelu kernel is available";
+    } else {
+      VLOG(1) << "MusaGelu fusion disabled by MUSA_DISABLE_GELU_FUSION";
+    }
   }
   return kernel_available_;
 }
@@ -584,11 +601,11 @@ FusionMatchResult MusaGeluFusion::MatchApproximatePattern(
 Status MusaGeluFusion::Apply(GraphDef* graph,
                              const FusionMatchResult& match_result) const {
   if (!match_result.IsValid()) {
-    return Status(error::INVALID_ARGUMENT, "Invalid GELU match result");
+    return errors::InvalidArgument("Invalid GELU match result");
   }
 
   if (!IsKernelAvailable()) {
-    return Status::OK();
+    return Status();
   }
 
   auto output_it = match_result.captured_nodes.find("output");
@@ -596,8 +613,7 @@ Status MusaGeluFusion::Apply(GraphDef* graph,
   if (output_it == match_result.captured_nodes.end() ||
       input_it == match_result.captured_nodes.end() || !output_it->second ||
       !input_it->second) {
-    return Status(error::INVALID_ARGUMENT,
-                  "Missing required nodes in GELU pattern");
+    return errors::InvalidArgument("Missing required nodes in GELU pattern");
   }
 
   const NodeDef* output_node = output_it->second;
@@ -631,7 +647,7 @@ Status MusaGeluFusion::Apply(GraphDef* graph,
     if (node.name() == original_name && node.op() == "MusaGelu") {
       // VLOG(1) << "MusaGeluFusion: fused node already exists for "
       //         << original_name;
-      return Status::OK();
+      return Status();
     }
   }
 
@@ -643,8 +659,7 @@ Status MusaGeluFusion::Apply(GraphDef* graph,
     }
   }
   if (output_node_idx < 0) {
-    return Status(error::INVALID_ARGUMENT,
-                  "Failed to find output node in graph: " + original_name);
+    return errors::InvalidArgument("Failed to find output node in graph: " + original_name);
   }
 
   NodeDef* original_output_node = graph->mutable_node(output_node_idx);
@@ -679,7 +694,7 @@ Status MusaGeluFusion::Apply(GraphDef* graph,
   //         << ", matched_nodes=" << match_result.matched_nodes.size()
   //         << ", removed_nodes=" << removed_count << ")";
 
-  return Status::OK();
+  return Status();
 }
 
 REGISTER_FUSION_PATTERN(MusaGeluFusion);

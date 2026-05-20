@@ -20,7 +20,7 @@
 #include "pinned_memory_pool.h"
 #include "tensorflow/core/framework/device.h"
 #include "tensorflow/core/framework/device_base.h"
-#include "tensorflow/stream_executor/stream.h"
+#include "xla/stream_executor/stream.h"
 
 namespace tensorflow {
 namespace musa {
@@ -86,8 +86,15 @@ class MusaDevice : public Device {
              ::stream_executor::StreamExecutor* executor, bool allow_growth);
   ~MusaDevice() override;
 
-  const GpuDeviceInfo* tensorflow_gpu_device_info() const override {
-    return &gpu_device_info_;
+  // TF 2.13+ renamed the per-device "GPU info" struct and accessor to
+  // AcceleratorDeviceInfo / tensorflow_accelerator_device_info() as part of
+  // generalizing the path to non-NVIDIA accelerators (TPU, ROCm, MUSA, …).
+  // The struct gained two PJRT-related fields (pjrt_context,
+  // use_pjrt_tensor_buffer) that default to nullptr/false, so the existing
+  // initialization code in MusaDevice::MusaDevice() doesn't have to set them.
+  const AcceleratorDeviceInfo* tensorflow_accelerator_device_info()
+      const override {
+    return &accelerator_device_info_;
   }
   Status TryGetDeviceContext(DeviceContext** out_context) override;
   Allocator* GetAllocator(AllocatorAttributes attr) override;
@@ -119,7 +126,7 @@ class MusaDevice : public Device {
   Allocator* musa_allocator_;
   Allocator* musa_host_allocator_;
   GPUPinnedMemoryPool* pinned_memory_pool_;
-  GpuDeviceInfo gpu_device_info_;
+  AcceleratorDeviceInfo accelerator_device_info_;
   MusaEventMgr* event_mgr_;
 
   std::unique_ptr<::musa::dnn::Handle> mudnn_handle_;

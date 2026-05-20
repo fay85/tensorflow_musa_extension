@@ -25,6 +25,14 @@ limitations under the License.
 
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+// TF 2.15: the Status migration (Status::OK() → Status(), and Status(error::CODE,
+// msg) → errors::CodeName(msg)) introduced a dependency on the
+// tensorflow::errors::* factory functions across every fusion .cc file. In
+// TF 2.6.1 these files didn't need errors.h because they used the
+// 2-arg Status constructor directly. The 17 fusion .cc files in this
+// directory all transitively include this header via their per-fusion .h,
+// so pulling errors.h in here resolves them all at once.
+#include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 
 namespace tensorflow {

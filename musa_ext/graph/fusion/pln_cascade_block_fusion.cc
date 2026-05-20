@@ -478,23 +478,23 @@ FusionMatchResult MusaPlnCascadeBlockFusion::Match(const GraphDef& graph,
 Status MusaPlnCascadeBlockFusion::Apply(
     GraphDef* graph, const FusionMatchResult& match_result) const {
   if (!match_result.IsValid()) {
-    return Status(error::INVALID_ARGUMENT,
+    return errors::InvalidArgument(
                   "Invalid PlnCascadeBlock match result");
   }
   if (!IsKernelAvailable()) {
-    return Status::OK();
+    return OkStatus();
   }
 
   auto tail_it = match_result.captured_nodes.find("tail");
   if (tail_it == match_result.captured_nodes.end() || !tail_it->second) {
-    return Status(error::INVALID_ARGUMENT,
+    return errors::InvalidArgument(
                   "Missing captured tail node for PlnCascadeBlock");
   }
 
   const std::string output_name = tail_it->second->name();
   const NodeDef* tail_node = FindNode(*graph, output_name);
   if (!tail_node || !IsEligiblePlnNode(*tail_node)) {
-    return Status::OK();
+    return OkStatus();
   }
 
   auto norm_it = match_result.captured_attrs.find("norm_input");
@@ -511,7 +511,7 @@ Status MusaPlnCascadeBlockFusion::Apply(
       indices_it == match_result.captured_attrs.end() ||
       select_it == match_result.captured_attrs.end() ||
       chain_it == match_result.captured_attrs.end()) {
-    return Status(error::INVALID_ARGUMENT,
+    return errors::InvalidArgument(
                   "Missing captured attrs for PlnCascadeBlock fusion");
   }
 
@@ -524,7 +524,7 @@ Status MusaPlnCascadeBlockFusion::Apply(
   if (num_steps < 2 || static_cast<int>(table_indices.size()) != num_steps ||
       static_cast<int>(select_on_true.size()) != num_steps ||
       num_steps > kMaxBlockSteps || chain_names.empty()) {
-    return Status::OK();
+    return OkStatus();
   }
 
   DataType dtype = DT_FLOAT;
@@ -536,7 +536,7 @@ Status MusaPlnCascadeBlockFusion::Apply(
 
   const int tail_idx = FusionGraphUtils::FindNodeIndex(*graph, output_name);
   if (tail_idx < 0) {
-    return Status::OK();
+    return OkStatus();
   }
   FusionGraphUtils::RemoveNode(graph, tail_idx);
 
@@ -580,7 +580,7 @@ Status MusaPlnCascadeBlockFusion::Apply(
           << ", add_input=" << add_it->second
           << ", bias_input=" << bias_it->second;
 
-  return Status::OK();
+  return OkStatus();
 }
 
 REGISTER_FUSION_PATTERN(MusaPlnCascadeBlockFusion);

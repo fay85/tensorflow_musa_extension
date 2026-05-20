@@ -24,7 +24,7 @@ Status CopyHostInt64ToDevice(OpKernelContext* ctx, const Tensor& src,
     return errors::Internal("SparseSlice: musaMemcpyAsync host to device failed: ",
                             musaGetErrorString(err));
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
