@@ -12,8 +12,10 @@ set -e
 #   ./build.sh wheel     # Build wheel package directly (recommended for distribution)
 # ============================================================================
 
-# Required TensorFlow version
-REQUIRED_TF_VERSION="2.6.1"
+# Required TensorFlow version.
+# This is the 2.15 variant of the plugin; the original lives in
+# tensorflow_musa_extension/ and targets 2.6.1.
+REQUIRED_TF_VERSION="2.15.1"
 
 # Function to check TensorFlow version
 check_tf_version() {

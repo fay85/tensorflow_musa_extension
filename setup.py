@@ -26,8 +26,8 @@ from wheel.bdist_wheel import bdist_wheel
 # Package metadata
 PACKAGE_NAME = "tensorflow_musa"  # pip install name
 SOURCE_DIR = "python"             # source code directory
-VERSION = "0.1.0"
-DESCRIPTION = "High-performance TensorFlow extension for Moore Threads MUSA GPUs"
+VERSION = "0.3.0"  # 0.3.x targets TF 2.15.x; 0.2.x targets TF 2.13; 0.1.x targets TF 2.6.1
+DESCRIPTION = "High-performance TensorFlow extension for Moore Threads MUSA GPUs (TF 2.15)"
 AUTHOR = "TensorFlow MUSA Authors"
 LICENSE = "Apache 2.0"
 
@@ -37,8 +37,15 @@ RUNTIME_CONFIG_BINDINGS = "_runtime_config_bindings"
 RUNTIME_CONFIG_BINDINGS_PATTERN = f"{RUNTIME_CONFIG_BINDINGS}*.so"
 BUILD_DIR = "build"
 
-# Required TensorFlow version
-REQUIRED_TF_VERSION = "2.6.1"
+# Required TensorFlow version. TF 2.15.x is the supported range for this
+# plugin variant. TF 2.13-2.14 *should* also work with this source tree
+# because:
+#   * the wheel ABI flag (CXX11_ABI=1) is the same since TF 2.10,
+#   * Keras `legacy.Adam` is present in 2.11-2.15 inclusive, and
+#   * the public OpKernel C++ API has been stable across that window.
+# If you build for 2.13/2.14, only the version-pin in this file and in
+# build.sh needs to change; the binary is forward-compatible.
+REQUIRED_TF_VERSION = "2.15.1"
 
 
 def check_tensorflow_version():

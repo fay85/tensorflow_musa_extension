@@ -1,5 +1,8 @@
 # TensorFlow MUSA Extension
 
+> **Branch `tf2.15.1`:** TensorFlow **2.15.1** + legacy `MusaDevice` (pre-PluggableDevice). See [docs/TF2.15.1.md](docs/TF2.15.1.md).  
+> **`main`:** multi-TF wheel; default path uses PluggableDevice on TF ≥ 2.10.
+
 面向摩尔线程（Moore Threads）MUSA GPU 的 TensorFlow 插件：通过 MUSA 内核与图优化为 TensorFlow 提供 GPU 加速。
 
 ## 特性
@@ -14,7 +17,7 @@
 - CMake ≥ 3.10，Make，GCC/G++（与 TensorFlow 2.6.1 wheel ABI 一致）
 - MUSA SDK（默认路径 `/usr/local/musa`）：Runtime、muBLAS、muDNN
 - Python ≥ 3.7
-- **TensorFlow == 2.6.1**（须与此版本一致）
+- **TensorFlow == 2.15.1** on branch `tf2.15.1` (this branch), or **2.6.1 / 2.15.1** on `main` per `setup.py`
 - NumPy ≥ 1.19.0
 
 ## 安装（推荐：Wheel）
@@ -23,7 +26,7 @@
 git clone <repository-url>
 cd tensorflow_musa_extension
 
-pip install tensorflow==2.6.1
+pip install tensorflow==2.15.1   # on branch tf2.15.1
 ./build.sh wheel
 pip install dist/tensorflow_musa-*.whl --no-deps
 ```

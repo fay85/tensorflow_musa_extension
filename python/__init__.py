@@ -33,35 +33,22 @@ from ._graph_optimizer import (
     DISABLED_FUSION_PATTERNS_PARAM,
     MUSA_GRAPH_OPTIMIZER_NAME,
     clear_musa_disabled_fusion_patterns,
-    clear_musa_graph_dump_config,
     disable_musa_graph_optimizer,
     disable_musa_fusion_patterns,
-    disable_musa_graph_dump,
     enable_musa_graph_optimizer,
-    enable_musa_graph_dump,
-    get_musa_graph_dump_directory,
     get_musa_disabled_fusion_patterns,
-    is_musa_graph_dump_enabled,
-    is_musa_graph_dump_slim_enabled,
-    is_musa_graph_dump_text_enabled,
     is_musa_graph_optimizer_enabled,
-    set_musa_graph_dump_config,
     set_musa_disabled_fusion_patterns,
     set_musa_graph_optimizer_enabled,
 )
 from ._loader import get_musa_devices, get_musa_ops, is_plugin_loaded, load_plugin
-from ._runtime_config import (
-    disable_musa_telemetry,
-    enable_musa_telemetry,
-    get_musa_telemetry_health,
-    is_musa_telemetry_enabled,
-    set_musa_allow_growth,
-    set_musa_telemetry_config,
-)
-from . import ops, raw_ops
+from ._optimizers import apply_adam_mixed, apply_sparse_adam_mixed
+from ._runtime_config import set_musa_allow_growth
 
-# Package version
-__version__ = "0.1.0"
+# Package version.
+# 0.3.x targets TF 2.15.x (this directory).
+# 0.1.x targets TF 2.6.1 (sister directory: tensorflow_musa_extension/).
+__version__ = "0.3.0"
 
 # Load plugin automatically on import
 _plugin_loaded = False
@@ -79,8 +66,6 @@ except Exception as e:
 # Public API
 __all__ = [
     "__version__",
-    "ops",
-    "raw_ops",
     "load_plugin",
     "get_musa_ops",
     "is_plugin_loaded",
@@ -95,18 +80,22 @@ __all__ = [
     "disable_musa_fusion_patterns",
     "clear_musa_disabled_fusion_patterns",
     "get_musa_disabled_fusion_patterns",
-    "set_musa_graph_dump_config",
-    "enable_musa_graph_dump",
-    "disable_musa_graph_dump",
-    "clear_musa_graph_dump_config",
-    "is_musa_graph_dump_enabled",
-    "get_musa_graph_dump_directory",
-    "is_musa_graph_dump_text_enabled",
-    "is_musa_graph_dump_slim_enabled",
     "set_musa_allow_growth",
-    "set_musa_telemetry_config",
-    "enable_musa_telemetry",
-    "disable_musa_telemetry",
-    "is_musa_telemetry_enabled",
-    "get_musa_telemetry_health",
+    "apply_adam_mixed",
+    "apply_sparse_adam_mixed",
+    "MusaAdam",
 ]
+
+
+def __getattr__(name):
+    """Lazily resolve ``MusaAdam`` so importing the package does not require
+    Keras to be importable. Anything else falls through to the default
+    AttributeError behaviour.
+    """
+    if name == "MusaAdam":
+        from ._optimizers import _make_musa_adam_class
+
+        cls = _make_musa_adam_class()
+        globals()["MusaAdam"] = cls
+        return cls
+    raise AttributeError(f"module 'tensorflow_musa' has no attribute {name!r}")

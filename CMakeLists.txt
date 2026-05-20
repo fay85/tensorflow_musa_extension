@@ -71,11 +71,19 @@ if(NOT EXISTS "${PYBIND11_INCLUDE}/pybind11/pybind11.h")
     message(FATAL_ERROR "Failed to find pybind11 headers. Please install pybind11 or use a TensorFlow package that includes pybind11 headers.")
 endif()
 
-# Clean ABI conflicts in TF_COMPILE_FLAGS
+# Clean ABI conflicts in TF_COMPILE_FLAGS, then force the new C++11 ABI
+# (libstdc++ >= 5). Every TF release from 2.10 onward — including the 2.15
+# target of this variant — ships official wheels built with
+# _GLIBCXX_USE_CXX11_ABI=1; the 2.6.1 plugin variant uses =0. Mixing them
+# manifests as undefined references to std::__cxx11::basic_string at link
+# time, or worse, silent data corruption when std::string crosses the
+# plugin / framework boundary.
+#
+# If you target a custom TF build with the old ABI for some reason, flip
+# this back to =0 and rebuild.
 string(REPLACE "-D_GLIBCXX_USE_CXX11_ABI=0" "" TF_COMPILE_FLAGS "${TF_COMPILE_FLAGS}")
 string(REPLACE "-D_GLIBCXX_USE_CXX11_ABI=1" "" TF_COMPILE_FLAGS "${TF_COMPILE_FLAGS}")
-# Re-add the safest definition
-set(TF_COMPILE_FLAGS "${TF_COMPILE_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
+set(TF_COMPILE_FLAGS "${TF_COMPILE_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 
 # Configure debug/logging-related compile definitions.
 #
@@ -87,7 +95,7 @@ set(TF_COMPILE_FLAGS "${TF_COMPILE_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
 # refcount aborts during session/resource destruction.
 #
 # Keep NDEBUG enabled in every build to match the TensorFlow wheel.
-set(TF_COMPILE_FLAGS "${TF_COMPILE_FLAGS} -DMUSA_DISABLE_DEBUG_LOGGING -DNDEBUG -DMUSA_DISABLE_AUTO_TRACE")
+set(TF_COMPILE_FLAGS "${TF_COMPILE_FLAGS} -DMUSA_DISABLE_DEBUG_LOGGING -DNDEBUG -DMUSA_DISABLE_TRACE_LOGGING -DMUSA_DISABLE_AUTO_TRACE")
 
 # Include paths
 include_directories("${TF_INC}" "${MUSA_PATH}/include")

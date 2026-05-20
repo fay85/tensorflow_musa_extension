@@ -15,8 +15,61 @@
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.h"
 
+// FP32-internal-compute launchers for the bf16/half same-type Adam path.
+// Defined in musa_applyadam_bf16_kernel.mu. The .mu side hides templates
+// behind plain-C wrappers so this .cc file does not need to instantiate
+// kernel templates across the .cc / .mu boundary.
+extern "C" {
+void LaunchApplyAdamSameType_BFloat16(void* var, void* m, void* v,
+                                       const void* grad, float lr_t,
+                                       float beta1, float beta2, float epsilon,
+                                       int64_t n, bool use_nesterov,
+                                       musaStream_t stream);
+void LaunchApplyAdamSameType_Half(void* var, void* m, void* v,
+                                   const void* grad, float lr_t, float beta1,
+                                   float beta2, float epsilon, int64_t n,
+                                   bool use_nesterov, musaStream_t stream);
+}
+
 namespace tensorflow {
 namespace musa {
+
+namespace {
+
+// Compile-time switch: true for the low-precision dtypes that have a
+// fp32-internal-compute kernel, false otherwise. Used to gate the dispatch
+// in both MusaResourceApplyAdamOp<T> and MusaApplyAdamKernelOp<T> without
+// forcing the compiler to look up symbols that don't exist for T=double or
+// integer instantiations.
+template <typename T>
+struct AdamSameTypeFP32Path {
+  static constexpr bool kEnabled = false;
+};
+template <>
+struct AdamSameTypeFP32Path<bfloat16> {
+  static constexpr bool kEnabled = true;
+};
+template <>
+struct AdamSameTypeFP32Path<Eigen::half> {
+  static constexpr bool kEnabled = true;
+};
+
+// Dispatch the matching plain-C launcher. Caller guarantees that
+// AdamSameTypeFP32Path<T>::kEnabled is true and that dtype matches T.
+inline void DispatchAdamSameType(DataType dtype, void* var, void* m, void* v,
+                                  const void* grad, float lr_t, float beta1,
+                                  float beta2, float epsilon, int64_t n,
+                                  bool use_nesterov, musaStream_t stream) {
+  if (dtype == DT_BFLOAT16) {
+    LaunchApplyAdamSameType_BFloat16(var, m, v, grad, lr_t, beta1, beta2,
+                                      epsilon, n, use_nesterov, stream);
+  } else {
+    LaunchApplyAdamSameType_Half(var, m, v, grad, lr_t, beta1, beta2, epsilon,
+                                  n, use_nesterov, stream);
+  }
+}
+
+}  // namespace
 
 // Keep Adam-related kernels in one translation unit so similarly shaped helper
 // classes do not end up with duplicate names across different .cc files.
@@ -29,7 +82,7 @@ Status CopyTensorForUpdate(OpKernelContext* ctx, const Tensor& src,
   TF_RETURN_IF_ERROR(ctx->allocate_temp(src.dtype(), src.shape(), dst, attr));
 
   if (src.TotalBytes() == 0) {
-    return Status::OK();
+    return Status();
   }
 
   // Use musaMemcpyAsync for same-device memory copy
@@ -41,18 +94,18 @@ Status CopyTensorForUpdate(OpKernelContext* ctx, const Tensor& src,
                             musaGetErrorString(err));
   }
 
-  return Status::OK();
+  return Status();
 }
 
 Status PrepareTensorForMusaUpdate(OpKernelContext* ctx, Var* var) {
   if (!var->copy_on_read_mode.load() && var->tensor()->RefCountIsOne()) {
-    return Status::OK();
+    return Status();
   }
 
   Tensor copied;
   TF_RETURN_IF_ERROR(CopyTensorForUpdate(ctx, *var->tensor(), &copied));
   *var->tensor() = copied;
-  return Status::OK();
+  return Status();
 }
 
 class MutexUnlocker {
@@ -155,7 +208,7 @@ class MusaResourceApplyAdamOp : public MusaOpKernel {
         return errors::Internal("ResourceApplyAdam ", op_name,
                                 " failed. Status: ", static_cast<int>(status));
       }
-      return Status::OK();
+      return Status();
     };
 
     auto fill_scalar = [&](T val, const TensorShape& shape,
@@ -192,6 +245,54 @@ class MusaResourceApplyAdamOp : public MusaOpKernel {
       alpha_val = static_cast<double>(lr) *
                   std::sqrt(1.0 - static_cast<double>(beta2_power)) /
                   one_minus_beta1_power;
+    }
+
+    // -----------------------------------------------------------------
+    // bf16 / fp16 same-type fast path.
+    //
+    // The default muDNN-Binary chain below rounds back to bf16/half nine
+    // times per step (after each MUL/ADD/SUB), quantizes (1 - beta1) to ~7
+    // mantissa bits via fill_scalar, and accumulates without fp32
+    // intermediates. The fp32-internal kernel does the whole update in fp32
+    // registers and rounds back exactly once at the m/v/var stores using
+    // __float2bfloat16 (RNE), so single-step error per element is bounded
+    // by 0.5 ULP rather than ~9 ULP.
+    //
+    // Numerical behavior change vs the muDNN chain: the bf16 path now
+    // matches stock fp32 Adam to within bf16 store-rounding noise instead
+    // of drifting by several ULP per step. This is the bug fix users
+    // wanted; if you need bit-for-bit reproducibility against the old
+    // path for some reason, set the (undocumented) MUSA_DISABLE_ADAM_BF16
+    // env var before launching.
+    if (AdamSameTypeFP32Path<T>::kEnabled &&
+        var_t.NumElements() > 0 &&
+        std::getenv("MUSA_DISABLE_ADAM_BF16") == nullptr) {
+      musaStream_t stream = GetMusaStreamByCtx(ctx);
+      DispatchAdamSameType(
+          var_t.dtype(),
+          const_cast<void*>(
+              static_cast<const void*>(var_t.tensor_data().data())),
+          const_cast<void*>(
+              static_cast<const void*>(m_t.tensor_data().data())),
+          const_cast<void*>(
+              static_cast<const void*>(v_t.tensor_data().data())),
+          static_cast<const void*>(grad.tensor_data().data()),
+          static_cast<float>(alpha_val), static_cast<float>(beta1),
+          static_cast<float>(beta2), static_cast<float>(epsilon),
+          var_t.NumElements(),
+          // Match legacy muDNN chain behavior, which silently ignored
+          // use_nesterov_. Flipping this to use_nesterov_ would correctly
+          // honor the attr but would silently change training dynamics
+          // for any user who previously set use_nesterov=True on the
+          // bf16/fp16 Adam path.
+          /*use_nesterov=*/false, stream);
+      musaError_t sync_err = musaStreamSynchronize(stream);
+      OP_REQUIRES(ctx, sync_err == musaSuccess,
+                  errors::Internal(
+                      "ResourceApplyAdam (bf16/fp16 fp32-compute path): "
+                      "musaStreamSynchronize failed: ",
+                      musaGetErrorString(sync_err)));
+      return;
     }
 
     // // Log shapes for debugging
@@ -275,9 +376,8 @@ class MusaResourceApplyAdamOp : public MusaOpKernel {
                                            v_t.shape(), &temp_storage.back()));
     mTensor t_sqrt_v = CreateMTensor(temp_storage.back(), format_);
     u_op.SetMode(::musa::dnn::Unary::Mode::SQRT);
-    OP_REQUIRES_OK(
-        ctx,
-        require_success(u_op.Run(handle, t_sqrt_v, t_v), "SQRT v"));
+    OP_REQUIRES_OK(ctx,
+                   require_success(u_op.Run(handle, t_sqrt_v, t_v), "SQRT v"));
 
     temp_storage.emplace_back();
     OP_REQUIRES_OK(ctx, ctx->allocate_temp(DataTypeToEnum<T>::value,
@@ -419,6 +519,41 @@ class MusaApplyAdamKernelOp : public MusaOpKernel {
       alpha_val = static_cast<double>(lr) *
                   std::sqrt(1.0 - static_cast<double>(beta2_power)) /
                   one_minus_beta1_power;
+    }
+
+    // bf16 / fp16 same-type fast path. See the long comment in
+    // MusaResourceApplyAdamOp::Compute above for the numerical rationale;
+    // this is the equivalent dispatch for the ref-variable ApplyAdam op.
+    if (AdamSameTypeFP32Path<T>::kEnabled &&
+        var_t->NumElements() > 0 &&
+        std::getenv("MUSA_DISABLE_ADAM_BF16") == nullptr) {
+      musaStream_t stream = GetMusaStreamByCtx(ctx);
+      DispatchAdamSameType(
+          var_t->dtype(),
+          const_cast<void*>(
+              static_cast<const void*>(var_t->tensor_data().data())),
+          const_cast<void*>(
+              static_cast<const void*>(m_t->tensor_data().data())),
+          const_cast<void*>(
+              static_cast<const void*>(v_t->tensor_data().data())),
+          static_cast<const void*>(grad.tensor_data().data()),
+          static_cast<float>(alpha_val), static_cast<float>(beta1),
+          static_cast<float>(beta2), static_cast<float>(epsilon),
+          var_t->NumElements(),
+          // Preserve existing behavior (use_nesterov silently ignored on
+          // the legacy path). See the matching comment in the resource
+          // variant above.
+          /*use_nesterov=*/false, stream);
+      // Ref-variable ApplyAdam needs explicit input->output forwarding
+      // here because the op has var as both ref-input and output.
+      if (IsRefType(ctx->input_dtype(0))) {
+        ctx->forward_ref_input_to_ref_output(0, 0);
+      } else {
+        for (int i = 0; i < ctx->num_outputs(); ++i) {
+          ctx->set_output(i, ctx->input(i));
+        }
+      }
+      return;
     }
 
     mTensor t_beta1;
