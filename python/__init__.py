@@ -62,7 +62,7 @@ from ._runtime_config import (
 from . import ops, raw_ops
 
 # Package version
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 # Load plugin automatically on import
 _plugin_loaded = False

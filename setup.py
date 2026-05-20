@@ -26,8 +26,8 @@ from wheel.bdist_wheel import bdist_wheel
 # Package metadata
 PACKAGE_NAME = "tensorflow_musa"  # pip install name
 SOURCE_DIR = "python"             # source code directory
-VERSION = "0.1.0"
-DESCRIPTION = "High-performance TensorFlow extension for Moore Threads MUSA GPUs"
+VERSION = "0.3.0"  # 0.3.x: tf_2.15.1_pluggable (PluggableDevice + TF 2.15.1)
+DESCRIPTION = "High-performance TensorFlow MUSA extension (TF 2.15.1, PluggableDevice)"
 AUTHOR = "TensorFlow MUSA Authors"
 LICENSE = "Apache 2.0"
 
@@ -37,8 +37,8 @@ RUNTIME_CONFIG_BINDINGS = "_runtime_config_bindings"
 RUNTIME_CONFIG_BINDINGS_PATTERN = f"{RUNTIME_CONFIG_BINDINGS}*.so"
 BUILD_DIR = "build"
 
-# Default TensorFlow version (used if TENSORFLOW_MUSA_TARGET_TF is unset)
-_DEFAULT_TF_VERSION = "2.6.1,2.15.1"
+# tf_2.15.1_pluggable branch: pin to TF 2.15.1 only (override via env if needed).
+_DEFAULT_TF_VERSION = "2.15.1"
 
 
 def _supported_tf_versions():
@@ -50,9 +50,8 @@ def _supported_tf_versions():
 def check_tensorflow_version():
     """Check if TensorFlow is installed and matches the supported set.
 
-    Set `TENSORFLOW_MUSA_TARGET_TF` to a comma-separated list, e.g.
-    `2.6.1` or `2.6.1,2.8.0` to build against one of those versions.
-    The installed `tf.__version__` must be exactly in that set.
+    Set `TENSORFLOW_MUSA_TARGET_TF` to override the default pin (e.g. `2.15.1`).
+    The installed `tf.__version__` must be exactly in the allowed set.
 
     The allowlist is for **this build** only: each produced wheel / `libmusa_plugin.so`
     must still be **compiled and tested** against the TensorFlow you run with.
@@ -75,7 +74,7 @@ def check_tensorflow_version():
             print(f"  Allowed: {sorted(allowed)}")
             print(f"  Installed: {version}")
             print("  Set TENSORFLOW_MUSA_TARGET_TF to include your version, e.g.:")
-            print("    export TENSORFLOW_MUSA_TARGET_TF=2.6.1,2.8.0")
+            print("    export TENSORFLOW_MUSA_TARGET_TF=2.15.1")
             print("  Or: pip install tensorflow==<one of the allowed versions>")
             sys.exit(1)
 
@@ -237,8 +236,8 @@ setup(
     },
     python_requires=">=3.7",
     # NOTE: tensorflow is NOT listed in install_requires to prevent pip from
-    # downloading it during wheel build. Users must install tensorflow==2.6.1
-    # manually before installing tensorflow_musa.
+    # downloading it during wheel build. Users must install tensorflow==2.15.1
+    # manually before installing tensorflow_musa (tf_2.15.1_pluggable branch).
     # See README.md for installation instructions.
     install_requires=[
         "numpy>=1.19.0",

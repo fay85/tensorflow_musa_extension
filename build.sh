@@ -12,9 +12,9 @@ set -e
 #   ./build.sh wheel     # Build wheel package directly (recommended for distribution)
 # ============================================================================
 
-# Default TensorFlow version allowlist. Override with comma-separated values, e.g.
-# TENSORFLOW_MUSA_TARGET_TF=2.6.1,2.15.1 ./build.sh
-TARGET_TF_VERSIONS="${TENSORFLOW_MUSA_TARGET_TF:-2.6.1,2.15.1}"
+# tf_2.15.1_pluggable branch: TF 2.15.1 only. Override with comma-separated list if needed.
+# Example: TENSORFLOW_MUSA_TARGET_TF=2.15.1 ./build.sh
+TARGET_TF_VERSIONS="${TENSORFLOW_MUSA_TARGET_TF:-2.15.1}"
 PYTHON_BIN="${PYTHON:-python3}"
 
 # Function to check TensorFlow version
