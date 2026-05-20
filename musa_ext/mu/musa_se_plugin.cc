@@ -507,13 +507,64 @@ void plugin_se_memcpy_dtoh(const SP_Device* device, SP_Stream stream,
     TF_SetStatus(status, TF_OK, "");
     return;
   }
-  ::tensorflow::musa::runtime::SetMusaDeviceOrStatus(Ordinal(device), status);
+  const int dev_ord = Ordinal(device);
+  ::tensorflow::musa::runtime::SetMusaDeviceOrStatus(dev_ord, status);
   if (TF_GetCode(status) != TF_OK) return;
   const void* src = device_src->opaque;
-  musaError_t err = musaMemcpyAsync(host_dst, src, size, musaMemcpyDeviceToHost,
-                                    stream->stream);
-  ::tensorflow::musa::runtime::SetStatusFromMusa(status, err,
-                                                 "musaMemcpyAsync D2H");
+
+  musaPointerAttributes attributes;
+  musaError_t attr_err = musaPointerGetAttributes(&attributes, host_dst);
+  const bool host_is_pinned =
+      attr_err == musaSuccess && attributes.type == musaMemoryTypeHost;
+  if (attr_err != musaSuccess) {
+    musaGetLastError();
+  }
+
+  if (host_is_pinned) {
+    musaError_t err = musaMemcpyAsync(host_dst, src, size, musaMemcpyDeviceToHost,
+                                      stream->stream);
+    ::tensorflow::musa::runtime::SetStatusFromMusa(status, err,
+                                                   "musaMemcpyAsync D2H");
+    return;
+  }
+
+  // Pageable host memory: stage via pinned bounce buffer (legacy MusaDevice
+  // parity). Async D2H directly into pageable host can race with CPU reads.
+  auto* pinned_pool =
+      ::tensorflow::musa::MusaSeRegistryPinnedMemoryPool(dev_ord);
+  if (pinned_pool == nullptr) {
+    musaError_t err = musaMemcpy(host_dst, src, size, musaMemcpyDeviceToHost);
+    ::tensorflow::musa::runtime::SetStatusFromMusa(status, err, "musaMemcpy D2H");
+    return;
+  }
+
+  void* bounce_buffer = pinned_pool->Allocate(static_cast<size_t>(size));
+  if (bounce_buffer == nullptr) {
+    musaError_t err = musaMemcpy(host_dst, src, size, musaMemcpyDeviceToHost);
+    ::tensorflow::musa::runtime::SetStatusFromMusa(status, err, "musaMemcpy D2H");
+    return;
+  }
+
+  musaError_t err = musaMemcpyAsync(bounce_buffer, src, size,
+                                    musaMemcpyDeviceToHost, stream->stream);
+  if (err != musaSuccess) {
+    pinned_pool->FreeAsync(bounce_buffer, static_cast<size_t>(size), nullptr);
+    TF_SetStatus(status, TF_INTERNAL,
+                 "musaMemcpyAsync D2H via pinned bounce buffer failed");
+    return;
+  }
+
+  err = musaStreamSynchronize(stream->stream);
+  if (err != musaSuccess) {
+    pinned_pool->FreeAsync(bounce_buffer, static_cast<size_t>(size), nullptr);
+    ::tensorflow::musa::runtime::SetStatusFromMusa(status, err,
+                                                   "musaStreamSynchronize D2H");
+    return;
+  }
+
+  std::memcpy(host_dst, bounce_buffer, static_cast<size_t>(size));
+  pinned_pool->FreeAsync(bounce_buffer, static_cast<size_t>(size), nullptr);
+  TF_SetStatus(status, TF_OK, "");
 }
 
 void plugin_se_memcpy_htod(const SP_Device* device, SP_Stream stream,
